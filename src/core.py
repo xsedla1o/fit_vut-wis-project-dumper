@@ -2,14 +2,14 @@ import logging
 import re
 from pathlib import Path
 from typing import Generator, Optional
-from unidecode import unidecode
 
 from requests import HTTPError
+from unidecode import unidecode
 
 from .http import Connection
 from .io import get_user_credentials
 from .objects import Course, CourseTask, TaskFile
-from .parsing import StudyParser, CourseParser, TaskParser, TaskFilesParser
+from .parsing import StudyParser, CourseParser, TaskParser, TaskFilesParser, MaterialsParser, MaterialsSubpagesParser
 
 log = logging.getLogger("core")
 
@@ -33,6 +33,17 @@ class Downloader:
         for task_name, task_link in CourseParser(page_content).get_task_names_and_links():
             yield CourseTask(task_name, task_link, course)
 
+    def _get_course_materials(self, course: Course):
+        assert self.connection is not None
+        page_content = self.connection.get_content(course.link)
+        materials_link = CourseParser(page_content).get_course_materials_link()
+        if materials_link is None:
+            return
+
+        page_content = self.connection.get_content(materials_link)
+        for materials_name, material_subpage_link in MaterialsParser(page_content).get_materials_subpage_links():
+            yield CourseTask(materials_name, material_subpage_link, course)
+
     def _try_get_course_task_files_link(self, course_task_link: str) -> Optional[str]:
         assert self.connection is not None
         page_content = self.connection.get_content(course_task_link)
@@ -49,6 +60,9 @@ class Downloader:
         files_downloaded = 0
         for task in self._get_course_tasks(course):
             files_downloaded += self._download_files_from_course_task(task)
+
+        for task in self._get_course_materials(course):
+            files_downloaded += self._download_files_from_course_materials(task)
 
         if not files_downloaded:
             log.info("found no project files in %s", course.abbr)
@@ -73,6 +87,25 @@ class Downloader:
 
         if not files_found:
             log.info("found no project files in %s/%s, none submitted maybe? :(", task.course.abbr, task.name)
+
+        return files_found
+
+    def _download_files_from_course_materials(self, task: CourseTask) -> int:
+        subpage_content = self.connection.get_content(task.link)
+        destination_dir = self.output_dir.joinpath(f'{unidecode(task.course.abbr)}/{task.name}')
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        files_found = 0
+        for material_name, material_link in MaterialsSubpagesParser(subpage_content,
+                                                                    self.connection).get_material_download_links():
+            log.debug("found file '%s/%s', downloading...", task.name, material_name)
+            destination_path = destination_dir
+            if "/" in material_name:
+                material_path, material_name = material_name.rsplit("/", 1)
+                destination_path = destination_path.joinpath(material_path)
+                destination_path.mkdir(parents=True, exist_ok=True)
+            destination_path = destination_path.joinpath(material_name)
+            self.connection.download_file(material_link, destination_path)
+            files_found += 1
 
         return files_found
 
